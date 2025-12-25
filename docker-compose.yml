@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  grpc-server:
+    image: grpc-server-go:latest
+    container_name: grpc-server
+    ports:
+      - "50051:50051"
+
+  grpc-client:
+    image: grpc-client-go:latest
+    container_name: grpc-client
+    depends_on:
+      - grpc-server
+    environment:
+      - GRPC_SERVER_ADDR=grpc-server:50051
+    ports:
+      - "8081:8081"
+
+  api-rest:
+    image: api-rest-rust:latest
+    container_name: api-rest
+    depends_on:
+      - grpc-client
+    environment:
+      - GRPC_CLIENT_URL=http://grpc-client:8081
+    ports:
+      - "8080:8080"

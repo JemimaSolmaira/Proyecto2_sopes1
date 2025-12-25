@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package blackfriday;
+
+option go_package = "blackfriday/proto;proto";
+
+// Mensaje con información de venta de producto durante Black Friday
+message ProductSaleRequest {
+  CategoriaProducto categoria = 1;
+  string producto_id = 2;
+  double precio = 3;
+  int32 cantidad_vendida = 4;
+}
+
+// Lista de categorías de productos
+enum CategoriaProducto {
+  CATEGORIA_PRODUCTO_UNSPECIFIED = 0;
+  Electronica = 1;
+  Ropa = 2;
+  Hogar = 3;
+  Belleza = 4;
+}
+
+// Respuesta del servidor
+message ProductSaleResponse {
+  string estado = 1;
+}
+
+// Servicio gRPC para procesamiento de ventas durante Black Friday
+service ProductSaleService {
+  rpc ProcesarVenta (ProductSaleRequest)
+      returns (ProductSaleResponse);
+}
