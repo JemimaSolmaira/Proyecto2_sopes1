@@ -1,0 +1,20 @@
+adminUser: admin
+adminPassword: admin
+
+service:
+  type: ClusterIP
+
+grafana.ini:
+  server:
+    root_url: http://grafana.local
+
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Valkey
+        type: redis-datasource
+        access: proxy
+        url: redis://valkey:6379
+        isDefault: true
+        editable: true

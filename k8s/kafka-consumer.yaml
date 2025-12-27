@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-consumer
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-consumer
+  template:
+    metadata:
+      labels:
+        app: kafka-consumer
+    spec:
+      containers:
+        - name: kafka-consumer
+          image: 34.59.249.209:5000/proyecto/k8s-kafka-consumer:1.1
+          imagePullPolicy: Always
+          env:
+            - name: KAFKA_BROKERS
+              value: "my-cluster-kafka-bootstrap.kafka:9092"
+            - name: KAFKA_TOPIC
+              value: "ventas"
+            - name: KAFKA_GROUP
+              value: "ventas-consumer"
+            - name: VALKEY_ADDR
+              value: "valkey-0.valkey:6379"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"

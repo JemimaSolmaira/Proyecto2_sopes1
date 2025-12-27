@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grpc-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: grpc-server
+  template:
+    metadata:
+      labels:
+        app: grpc-server
+    spec:
+      containers:
+        - name: grpc-server
+          image: 34.59.249.209:5000/grpc-server-go:1.1
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 50051
+          env:
+            - name: GRPC_PORT
+              value: "50051"
+            - name: KAFKA_BROKERS
+              value: "my-cluster-kafka-bootstrap.kafka:9092"
+            - name: KAFKA_TOPIC
+              value: "ventas"
+          readinessProbe:
+            tcpSocket:
+              port: 50051
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 50051
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grpc-server-svc
+spec:
+  selector:
+    app: grpc-server
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+  type: ClusterIP

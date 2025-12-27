@@ -5,32 +5,21 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::Mutex;
 use tracing::{info, warn};
 use uuid::Uuid;
-
-use tonic::transport::Channel;
-
-pub mod blackfriday {
-    tonic::include_proto!("blackfriday"); 
-}
-
-use blackfriday::{
-    product_sale_service_client::ProductSaleServiceClient,
-    CategoriaProducto as GrpcCategoria,
-    ProductSaleRequest as GrpcSaleRequest,
-};
 
 #[derive(Clone)]
 struct AppState {
     total_ventas: Arc<AtomicU64>,
-    grpc_client: Arc<Mutex<ProductSaleServiceClient<Channel>>>,
+    go_client_url: String,
+    http: Client,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProductSaleRequest {
     categoria: CategoriaProducto,
@@ -39,7 +28,7 @@ struct ProductSaleRequest {
     cantidad_vendida: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
 enum CategoriaProducto {
     Electronica,
@@ -56,33 +45,18 @@ struct ProductSaleResponse {
     total_ventas_recibidas: u64,
 }
 
-fn map_categoria_to_grpc(cat: &CategoriaProducto) -> i32 {
-    match cat {
-        CategoriaProducto::Electronica => GrpcCategoria::Electronica as i32,
-        CategoriaProducto::Ropa => GrpcCategoria::Ropa as i32,
-        CategoriaProducto::Hogar => GrpcCategoria::Hogar as i32,
-        CategoriaProducto::Belleza => GrpcCategoria::Belleza as i32,
-    }
-}
-
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    // Dirección del gRPC server (Go)
-    let grpc_addr = std::env::var("GRPC_SERVER_ADDR").unwrap_or_else(|_| "http://localhost:50051".to_string());
-
-    let channel = Channel::from_shared(grpc_addr)
-        .expect("GRPC_SERVER_ADDR inválida (debe incluir http://)")
-        .connect()
-        .await
-        .expect("No pude conectar al gRPC server");
-
-    let grpc_client = ProductSaleServiceClient::new(channel);
+    // URL del Go client (REST)
+    let go_client_url =
+        std::env::var("GO_CLIENT_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
 
     let state = AppState {
         total_ventas: Arc::new(AtomicU64::new(0)),
-        grpc_client: Arc::new(Mutex::new(grpc_client)),
+        go_client_url,
+        http: Client::new(),
     };
 
     let app = Router::new()
@@ -105,7 +79,6 @@ async fn recibir_venta(
     State(state): State<AppState>,
     Json(req): Json<ProductSaleRequest>,
 ) -> impl IntoResponse {
-    // Validaciones
     if req.producto_id.trim().is_empty() {
         warn!("producto_id vacío");
         return (StatusCode::BAD_REQUEST, "producto_id no puede ir vacío").into_response();
@@ -122,29 +95,38 @@ async fn recibir_venta(
     let total = state.total_ventas.fetch_add(1, Ordering::Relaxed) + 1;
     let request_id = Uuid::new_v4().to_string();
 
-    // Construir request gRPC
-    let grpc_req = GrpcSaleRequest {
-        categoria: map_categoria_to_grpc(&req.categoria),
-        producto_id: req.producto_id.clone(),
-        precio: req.precio,
-        cantidad_vendida: req.cantidad_vendida,
-    };
+    // Llamar al Go Client (HTTP)
+    let url = format!("{}/ventas", state.go_client_url.trim_end_matches('/'));
 
-    // Llamar gRPC
-    let mut client = state.grpc_client.lock().await;
-    let grpc_result = client.procesar_venta(tonic::Request::new(grpc_req)).await;
+    let resp = state
+        .http
+        .post(url)
+        .json(&req)
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await;
 
-    let estado = match grpc_result {
-        Ok(resp) => resp.into_inner().estado,
+    let estado = match resp {
+        Ok(r) if r.status().is_success() => {
+            let v: serde_json::Value =
+                r.json().await.unwrap_or_else(|_| serde_json::json!({"estado":"OK"}));
+            v.get("estado")
+                .and_then(|x| x.as_str())
+                .unwrap_or("OK")
+                .to_string()
+        }
+        Ok(r) => {
+            warn!("Go client respondió HTTP {}", r.status());
+            return (StatusCode::BAD_GATEWAY, "Error llamando Go Client").into_response();
+        }
         Err(e) => {
-            warn!("Error llamando gRPC: {}", e);
-            // puedes decidir si devuelves 502 o 200 con estado error
-            return (StatusCode::BAD_GATEWAY, "Error llamando gRPC").into_response();
+            warn!("Error llamando Go Client: {}", e);
+            return (StatusCode::BAD_GATEWAY, "Error llamando Go Client").into_response();
         }
     };
 
     info!(
-        "Venta recibida id={} categoria={:?} producto_id={} precio={} qty={} total={} -> gRPC estado={}",
+        "Venta recibida id={} categoria={:?} producto_id={} precio={} qty={} total={} -> GoClient estado={}",
         request_id, req.categoria, req.producto_id, req.precio, req.cantidad_vendida, total, estado
     );
 
