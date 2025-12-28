@@ -1,0 +1,273 @@
+# =========================================================
+# 1) PVCs (uno por VM)
+# =========================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: valkey-vm-0-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: valkey-vm-1-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+
+# =========================================================
+# 2) Services
+# =========================================================
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey-primary
+spec:
+  selector:
+    kubevirt.io/domain: valkey-vm-0
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey-replica
+spec:
+  selector:
+    kubevirt.io/domain: valkey-vm-1
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey
+spec:
+  selector:
+    kubevirt.io/domain: valkey-vm-0
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+  type: ClusterIP
+
+# =========================================================
+# 3) VM PRIMARY (valkey-vm-0) - Redis directo en VM
+# =========================================================
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: valkey-vm-0
+spec:
+  running: true
+  template:
+    metadata:
+      labels:
+        kubevirt.io/domain: valkey-vm-0
+    spec:
+      domain:
+        resources:
+          requests:
+            cpu: "500m"
+            memory: 512Mi
+        devices:
+          disks:
+            - name: rootdisk
+              disk: { bus: virtio }
+            - name: datadisk
+              disk: { bus: virtio }
+            - name: cloudinit
+              disk: { bus: virtio }
+          interfaces:
+            - name: default
+              masquerade: {}
+              ports:
+                - port: 6379
+                  protocol: TCP
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: rootdisk
+          containerDisk:
+            image: quay.io/containerdisks/ubuntu:22.04
+        - name: datadisk
+          persistentVolumeClaim:
+            claimName: valkey-vm-0-data
+        - name: cloudinit
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              ssh_pwauth: true
+              users:
+                - name: ubuntu
+                  groups: [sudo]
+                  shell: /bin/bash
+                  sudo: ALL=(ALL) NOPASSWD:ALL
+                  lock_passwd: false
+              chpasswd:
+                list: |
+                  ubuntu:Ubuntu1234
+                expire: false
+
+              package_update: true
+              packages:
+                - redis-server
+                - redis-tools
+
+              runcmd:
+                - |
+                  set -eux
+                  # Mitigación: overcommit (no es el error RO, pero ayuda con bgsave)
+                  sysctl -w vm.overcommit_memory=1 || true
+                  grep -q '^vm.overcommit_memory=1' /etc/sysctl.conf || echo 'vm.overcommit_memory=1' >> /etc/sysctl.conf
+
+                  DISK=/dev/vdb
+                  MNT=/data
+                  # esperar disco
+                  for i in $(seq 1 60); do
+                    [ -b "$DISK" ] && break
+                    sleep 1
+                  done
+
+                  mkdir -p "$MNT"
+
+                  # si no tiene fs, formatear
+                  blkid "$DISK" || mkfs.ext4 -F "$DISK"
+
+                  # intento de reparación ligera (por si quedó sucio)
+                  fsck -fy "$DISK" || true
+
+                  mount "$DISK" "$MNT"
+                  grep -q "^$DISK " /etc/fstab || echo "$DISK $MNT ext4 defaults,nofail 0 2" >> /etc/fstab
+
+                  mkdir -p /data/redis
+                  chown -R redis:redis /data/redis
+                  chmod 750 /data/redis
+
+                  # Config Redis para KubeVirt
+                  cat <<'EOF' >> /etc/redis/redis.conf
+
+                  # --- Config agregado para KubeVirt ---
+                  bind 0.0.0.0
+                  protected-mode no
+                  dir /data/redis
+                  appendonly no
+                  # --- Fin config ---
+                  EOF
+
+                  systemctl enable --now redis-server
+
+# =========================================================
+# 4) VM REPLICA (valkey-vm-1)
+# =========================================================
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: valkey-vm-1
+spec:
+  running: true
+  template:
+    metadata:
+      labels:
+        kubevirt.io/domain: valkey-vm-1
+    spec:
+      domain:
+        resources:
+          requests:
+            cpu: "500m"
+            memory: 512Mi
+        devices:
+          disks:
+            - name: rootdisk
+              disk: { bus: virtio }
+            - name: datadisk
+              disk: { bus: virtio }
+            - name: cloudinit
+              disk: { bus: virtio }
+          interfaces:
+            - name: default
+              masquerade: {}
+              ports:
+                - port: 6379
+                  protocol: TCP
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: rootdisk
+          containerDisk:
+            image: quay.io/containerdisks/ubuntu:22.04
+        - name: datadisk
+          persistentVolumeClaim:
+            claimName: valkey-vm-1-data
+        - name: cloudinit
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              ssh_pwauth: true
+              users:
+                - name: ubuntu
+                  groups: [sudo]
+                  shell: /bin/bash
+                  sudo: ALL=(ALL) NOPASSWD:ALL
+                  lock_passwd: false
+              chpasswd:
+                list: |
+                  ubuntu:Ubuntu1234
+                expire: false
+
+              package_update: true
+              packages:
+                - redis-server
+                - redis-tools
+
+              runcmd:
+                - |
+                  set -eux
+                  sysctl -w vm.overcommit_memory=1 || true
+                  grep -q '^vm.overcommit_memory=1' /etc/sysctl.conf || echo 'vm.overcommit_memory=1' >> /etc/sysctl.conf
+
+                  DISK=/dev/vdb
+                  MNT=/data
+                  for i in $(seq 1 60); do
+                    [ -b "$DISK" ] && break
+                    sleep 1
+                  done
+                  mkdir -p "$MNT"
+                  blkid "$DISK" || mkfs.ext4 -F "$DISK"
+                  fsck -fy "$DISK" || true
+                  mount "$DISK" "$MNT"
+                  grep -q "^$DISK " /etc/fstab || echo "$DISK $MNT ext4 defaults,nofail 0 2" >> /etc/fstab
+
+                  mkdir -p /data/redis
+                  chown -R redis:redis /data/redis
+                  chmod 750 /data/redis
+
+                  cat <<'EOF' >> /etc/redis/redis.conf
+
+                  # --- Config agregado para KubeVirt (replica) ---
+                  bind 0.0.0.0
+                  protected-mode no
+                  dir /data/redis
+                  appendonly no
+                  replicaof valkey-primary 6379
+                  # --- Fin config ---
+                  EOF
+
+                  systemctl enable --now redis-server

@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: kafka-consumer
-          image: 34.59.249.209:5000/proyecto/k8s-kafka-consumer:1.1
+          image: 34.59.249.209:5000/proyecto/k8s-kafka-consumer:1.4
           imagePullPolicy: Always
           env:
             - name: KAFKA_BROKERS
@@ -25,7 +25,7 @@ spec:
             - name: KAFKA_GROUP
               value: "ventas-consumer"
             - name: VALKEY_ADDR
-              value: "valkey-0.valkey:6379"
+              value: "valkey-primary:6379"
           resources:
             requests:
               cpu: "50m"
