@@ -55,6 +55,10 @@ func main() {
 	bestProdKey := "venta:stats:producto_mas_vendido" // STRING: "ID (score)"
 	worstProdKey := "venta:stats:producto_menos_vendido"
 
+	bestProdCatKey := "venta:stats:best_producto_por_categoria"          // HASH: categoria -> productoId
+	bestAvgCatKey := "venta:stats:best_producto_avgprecio_por_categoria" // HASH: categoria -> avg(precio del best)
+	bestQtyCatKey := "venta:stats:best_producto_qty_por_categoria"       // HASH: categoria -> qty(best) (opcional)
+
 	for {
 		m, err := reader.ReadMessage(ctx)
 		if err != nil {
@@ -83,6 +87,32 @@ func main() {
 		}
 		if v.ProductoID == "" {
 			v.ProductoID = "UNKNOWN"
+		}
+
+		prodCatZKey := "venta:stats:productos_por_categoria:" + v.Categoria
+		sumProdKey := "venta:stats:sumPrecio_por_producto:" + v.Categoria // HASH: productoId -> suma(precio)
+		cntProdKey := "venta:stats:count_por_producto:" + v.Categoria     // HASH: productoId -> conteo
+
+		if v.CantidadVendida > 0 {
+			rdb.ZIncrBy(
+				ctx,
+				prodCatZKey,
+				float64(v.CantidadVendida),
+				v.ProductoID,
+			)
+		}
+
+		if err := updateBestAvgPriceByCategory(
+			ctx, rdb,
+			v.Categoria,
+			prodCatZKey,
+			sumProdKey,
+			cntProdKey,
+			bestProdCatKey,
+			bestAvgCatKey,
+			bestQtyCatKey,
+		); err != nil {
+			log.Printf("update best avg cat error: %v", err)
 		}
 
 		// 3) Total de reportes por categoría (para gráfica "Total de Reportes por Categoría")
@@ -125,6 +155,40 @@ func main() {
 				continue
 			}
 		}
+
+		tsKey := fmt.Sprintf(
+			"venta:ts:precio:%s:%s",
+			v.Categoria,
+			v.ProductoID,
+		)
+
+		newSumProd, err := rdb.HIncrByFloat(ctx, sumProdKey, v.ProductoID, v.Precio).Result()
+		if err != nil {
+			log.Printf("sumProd error: %v", err)
+			continue
+		}
+
+		newCntProd, err := rdb.HIncrBy(ctx, cntProdKey, v.ProductoID, 1).Result()
+		if err != nil {
+			log.Printf("cntProd error: %v", err)
+			continue
+		}
+
+		// avg del producto actual (no necesariamente el best)
+		_ = newSumProd / float64(newCntProd)
+
+		tsZKey := fmt.Sprintf("venta:ts:precio:%s:%s", v.Categoria, v.ProductoID)
+		tsHKey := fmt.Sprintf("venta:ts2:precio:%s:%s", v.Categoria, v.ProductoID)
+
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+
+		_ = rdb.ZAdd(ctx, tsZKey, redis.Z{Score: float64(time.Now().Unix()), Member: fmt.Sprintf("%.2f", v.Precio)}).Err()
+
+		if err := rdb.HSet(ctx, tsHKey, ts, fmt.Sprintf("%.2f", v.Precio)).Err(); err != nil {
+			log.Printf("Valkey HSET ts2 error: %v", err)
+		}
+
+		_ = rdb.ZRemRangeByRank(ctx, tsKey, 0, -1001).Err()
 
 		log.Printf("OK | cat=%s precio=%.2f cnt=%d avg=%.2f prod=%s cant=%d",
 			v.Categoria, v.Precio, newCnt, avg, v.ProductoID, v.CantidadVendida)
@@ -201,6 +265,76 @@ func getenv(k, def string) string {
 		return v
 	}
 	return def
+}
+
+func updateBestAvgPriceByCategory(
+	ctx context.Context,
+	rdb *redis.Client,
+	categoria string,
+	zkey string,
+	sumProdKey string,
+	cntProdKey string,
+	bestProdCatKey string,
+	bestAvgCatKey string,
+	bestQtyCatKey string,
+) error {
+	top, err := rdb.ZRevRangeWithScores(ctx, zkey, 0, 0).Result()
+	if err != nil {
+		return err
+	}
+	if len(top) == 0 {
+		return nil
+	}
+
+	bestID, ok := top[0].Member.(string)
+	if !ok {
+		bestID = fmt.Sprintf("%v", top[0].Member)
+	}
+	bestQty := top[0].Score
+
+	// obtener sum/count del best product (dentro de la categoría)
+	sumStr, err := rdb.HGet(ctx, sumProdKey, bestID).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return nil
+		}
+		return err
+	}
+	cntStr, err := rdb.HGet(ctx, cntProdKey, bestID).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return nil
+		}
+		return err
+	}
+
+	sumV, err := strconv.ParseFloat(sumStr, 64)
+	if err != nil {
+		return err
+	}
+	cntV, err := strconv.ParseFloat(cntStr, 64)
+	if err != nil {
+		return err
+	}
+	if cntV <= 0 {
+		return nil
+	}
+
+	avg := sumV / cntV
+
+	// guardar para Grafana (campo=categoria)
+	if err := rdb.HSet(ctx, bestProdCatKey, categoria, bestID).Err(); err != nil {
+		return err
+	}
+	if err := rdb.HSet(ctx, bestAvgCatKey, categoria, fmt.Sprintf("%.2f", avg)).Err(); err != nil {
+		return err
+	}
+	if bestQtyCatKey != "" {
+		if err := rdb.HSet(ctx, bestQtyCatKey, categoria, fmt.Sprintf("%.0f", bestQty)).Err(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func itoa(v int) string     { return strconv.Itoa(v) }

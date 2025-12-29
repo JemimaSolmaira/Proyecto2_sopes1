@@ -9,7 +9,7 @@ spec:
   accessModes: [ReadWriteOnce]
   resources:
     requests:
-      storage: 2Gi
+      storage: 10Gi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -19,7 +19,7 @@ spec:
   accessModes: [ReadWriteOnce]
   resources:
     requests:
-      storage: 2Gi
+      storage: 5Gi
 
 # =========================================================
 # 2) Services
@@ -83,7 +83,7 @@ spec:
         resources:
           requests:
             cpu: "500m"
-            memory: 512Mi
+            memory: 1Gi
         devices:
           disks:
             - name: rootdisk
@@ -124,10 +124,7 @@ spec:
                   ubuntu:Ubuntu1234
                 expire: false
 
-              package_update: true
-              packages:
-                - redis-server
-                - redis-tools
+              package_update: false
 
               runcmd:
                 - |
@@ -232,10 +229,7 @@ spec:
                   ubuntu:Ubuntu1234
                 expire: false
 
-              package_update: true
-              packages:
-                - redis-server
-                - redis-tools
+              package_update: false
 
               runcmd:
                 - |

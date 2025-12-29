@@ -15,8 +15,7 @@ spec:
     spec:
       containers:
         - name: kafka-consumer
-          image: 34.59.249.209:5000/proyecto/k8s-kafka-consumer:1.4
-          imagePullPolicy: Always
+          image: 34.59.249.209:5000/proyecto/k8s-kafka-consumer:1.8
           env:
             - name: KAFKA_BROKERS
               value: "my-cluster-kafka-bootstrap.kafka:9092"
